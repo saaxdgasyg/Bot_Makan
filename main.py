@@ -82,9 +82,13 @@ POLA_BMI = re.compile(r"^(?:bmi|tb|bb|berat|tinggi)\s+(\d+)\s+(\d+)", re.IGNOREC
 DB_PATH = Path(__file__).parent / "bot_data.db"
 USE_POSTGRES = HAS_POSTGRES and DATABASE_URL is not None
 
+# Variabel global untuk merekam status inisialisasi database
+STATUS_DATABASE = "PostgreSQL terhubung sukses! ✅"
+DB_ERROR_MESSAGE = ""
+
 def dapatkan_koneksi():
     """Membuka koneksi ke PostgreSQL dengan fallback otomatis ke SQLite jika gagal."""
-    global USE_POSTGRES
+    global USE_POSTGRES, STATUS_DATABASE, DB_ERROR_MESSAGE
     if USE_POSTGRES:
         try:
             url = urlparse.urlparse(DATABASE_URL)
@@ -103,12 +107,16 @@ def dapatkan_koneksi():
                 port=port,
                 connect_timeout=5
             )
+            STATUS_DATABASE = "PostgreSQL terhubung sukses! ✅"
             return conn
         except Exception as e:
-            logger.error("Gagal menyambung ke PostgreSQL, beralih otomatis ke SQLite! Error: %s", str(e))
+            DB_ERROR_MESSAGE = str(e)
+            logger.error("Gagal menyambung ke PostgreSQL, beralih otomatis ke SQLite! Error: %s", DB_ERROR_MESSAGE)
+            STATUS_DATABASE = f"PostgreSQL gagal terhubung (Beralih ke SQLite lokal). ⚠️\nDetail Error: `{DB_ERROR_MESSAGE}`"
             USE_POSTGRES = False # Nonaktifkan postgres untuk pemanggilan selanjutnya
             return sqlite3.connect(DB_PATH)
     else:
+        STATUS_DATABASE = "Menggunakan database SQLite lokal. 📂"
         return sqlite3.connect(DB_PATH)
 
 def dapatkan_placeholder():
@@ -116,40 +124,41 @@ def dapatkan_placeholder():
 
 def init_db() -> None:
     """Inisialisasi tabel dengan kolom tambahan BMI & status reminder."""
-    conn = dapatkan_koneksi()
-    cursor = conn.cursor()
+    try:
+        conn = dapatkan_koneksi()
+        cursor = conn.cursor()
 
-    if USE_POSTGRES:
-        logger.info("Menggunakan database PostgreSQL.")
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                user_id         BIGINT PRIMARY KEY,
-                nama            VARCHAR(255) DEFAULT '',
-                alergi          TEXT         DEFAULT 'Tidak ada',
-                menu            VARCHAR(255) DEFAULT '',
-                reminder        INTEGER      DEFAULT 0,
-                bergabung       VARCHAR(50)  DEFAULT '',
-                tinggi_badan    INTEGER      DEFAULT 0,
-                berat_badan     INTEGER      DEFAULT 0,
-                bmi             REAL         DEFAULT 0.0,
-                reminder_harian INTEGER      DEFAULT 1
+        if USE_POSTGRES:
+            logger.info("Menggunakan database PostgreSQL.")
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id         BIGINT PRIMARY KEY,
+                    nama            VARCHAR(255) DEFAULT '',
+                    alergi          TEXT         DEFAULT 'Tidak ada',
+                    menu            VARCHAR(255) DEFAULT '',
+                    reminder        INTEGER      DEFAULT 0,
+                    bergabung       VARCHAR(50)  DEFAULT '',
+                    tinggi_badan    INTEGER      DEFAULT 0,
+                    berat_badan     INTEGER      DEFAULT 0,
+                    bmi             REAL         DEFAULT 0.0,
+                    reminder_harian INTEGER      DEFAULT 1
+                )
+                """
             )
-            """
-        )
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS riwayat (
-                id          SERIAL PRIMARY KEY,
-                user_id     BIGINT NOT NULL,
-                keluhan     TEXT NOT NULL,
-                menu        VARCHAR(255) NOT NULL,
-                jawaban_ai  TEXT NOT NULL,
-                waktu       VARCHAR(50) NOT NULL,
-                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS riwayat (
+                    id          SERIAL PRIMARY KEY,
+                    user_id     BIGINT NOT NULL,
+                    keluhan     TEXT NOT NULL,
+                    menu        VARCHAR(255) NOT NULL,
+                    jawaban_ai  TEXT NOT NULL,
+                    waktu       VARCHAR(50) NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                )
+                """
             )
-            """
-        )
     else:
         logger.info("Menggunakan database SQLite.")
         cursor.execute(
@@ -182,19 +191,27 @@ def init_db() -> None:
             """
         )
 
-    # Migrasi kolom lama jika SQLite belum punya kolom baru (untuk keamanan)
-    if not USE_POSTGRES:
-        try:
-            cursor.execute("ALTER TABLE users ADD COLUMN tinggi_badan INTEGER DEFAULT 0")
-            cursor.execute("ALTER TABLE users ADD COLUMN berat_badan INTEGER DEFAULT 0")
-            cursor.execute("ALTER TABLE users ADD COLUMN bmi REAL DEFAULT 0.0")
-            cursor.execute("ALTER TABLE users ADD COLUMN reminder_harian INTEGER DEFAULT 1")
-        except sqlite3.OperationalError:
-            pass # Kolom sudah ada
+    # Migrasi kolom — tambahkan kolom baru jika belum ada (PostgreSQL & SQLite)
+        kolom_baru = [
+            ("tinggi_badan", "INTEGER DEFAULT 0"),
+            ("berat_badan", "INTEGER DEFAULT 0"),
+            ("bmi", "REAL DEFAULT 0.0"),
+            ("reminder_harian", "INTEGER DEFAULT 1"),
+        ]
+        for kolom, tipe in kolom_baru:
+            try:
+                cursor.execute(f"ALTER TABLE users ADD COLUMN {kolom} {tipe}")
+                logger.info("Kolom '%s' berhasil ditambahkan ke tabel users.", kolom)
+            except Exception:
+                pass  # Kolom sudah ada, abaikan
 
-    conn.commit()
-    conn.close()
-    logger.info("Database siap digunakan.")
+        conn.commit()
+        conn.close()
+        logger.info("Database siap digunakan.")
+    except Exception as e:
+        global STATUS_DATABASE
+        STATUS_DATABASE = f"Kritis: Inisialisasi DB gagal! 🚨\nError: `{str(e)}`"
+        logger.error(STATUS_DATABASE)
 
 
 def get_or_create_user(user_id: int, nama: str = "") -> dict:
@@ -838,6 +855,38 @@ async def proses_konsultasi(
 
 
 # ══════════════════════════════════════════════
+# ERROR HANDLER GLOBAL — Kirim error ke chat Telegram
+# ══════════════════════════════════════════════
+import traceback as tb_module
+
+async def error_handler(update: object, context) -> None:
+    """Menangkap semua error dan mengirimkan detail ke chat Telegram."""
+    logger.error("Exception saat memproses update:", exc_info=context.error)
+
+    # Format traceback
+    tb_list = tb_module.format_exception(None, context.error, context.error.__traceback__)
+    tb_string = "".join(tb_list)
+
+    # Batasi panjang pesan Telegram (maks 4096 karakter)
+    pesan_error = (
+        f"⚠️ <b>Terjadi Error pada Bot!</b>\n\n"
+        f"<b>Error:</b> <code>{type(context.error).__name__}: {str(context.error)}</code>\n\n"
+        f"<b>Traceback:</b>\n<pre>{tb_string[:3500]}</pre>"
+    )
+
+    # Kirim ke chat yang memicu error (jika ada update)
+    if update and hasattr(update, 'effective_chat') and update.effective_chat:
+        try:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=pesan_error,
+                parse_mode="HTML",
+            )
+        except Exception as send_err:
+            logger.error("Gagal mengirim pesan error ke chat: %s", send_err)
+
+
+# ══════════════════════════════════════════════
 # MAIN — Jalankan Bot
 # ══════════════════════════════════════════════
 def main() -> None:
@@ -854,6 +903,9 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(callback_misc, pattern="^(confirm_reset|toggle_reminder_)"))
     
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, pesan_teks_handler))
+
+    # Daftarkan error handler global
+    application.add_error_handler(error_handler)
 
     logger.info("Bot berjalan dengan fitur pemisahan user ID ketat & hitung BMI!")
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
