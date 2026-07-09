@@ -1135,10 +1135,20 @@ async def proses_konsultasi(
 
     except Exception as e:
         logger.error("Error Gemini: %s", str(e))
-        await pesan_tunggu.edit_text(
-            f"❌ *Terjadi kesalahan.*\n\nDetail: `{str(e)}`",
-            parse_mode="Markdown",
-        )
+        error_str = str(e)
+        
+        # Intercept error Limit / Quota dari API Gemini
+        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "Quota exceeded" in error_str:
+            pesan_error = "⏳ *Sistem sedang sibuk (Limit AI Tercapai)!*\n\nBatas penggunaan AI sedang penuh karena terlalu banyak permintaan. Mohon tunggu beberapa detik, lalu coba ketik keluhanmu lagi ya! 🙏"
+        else:
+            # Batasi panjang error teks agar Telegram tidak gagal kirim karena terlalu panjang
+            pesan_error = f"❌ *Terjadi kesalahan.*\n\nDetail: `{error_str[:500]}`"
+            
+        try:
+            await pesan_tunggu.edit_text(pesan_error, parse_mode="Markdown")
+        except Exception:
+            # Fallback tanpa parse_mode jika Markdown gagal
+            await pesan_tunggu.edit_text(pesan_error.replace("*", "").replace("`", ""))
 
 
 # ══════════════════════════════════════════════
