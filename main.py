@@ -1110,7 +1110,14 @@ async def proses_konsultasi(
             else ""
         )
 
-        await pesan_tunggu.edit_text(f"{jawaban_ai}{info_alergi}", parse_mode="Markdown")
+        try:
+            await pesan_tunggu.edit_text(f"{jawaban_ai}{info_alergi}", parse_mode="Markdown")
+        except Exception as parse_err:
+            if "parse" in str(parse_err).lower():
+                # Fallback: Kirim teks polos jika ada karakter markdown yang tidak valid
+                await pesan_tunggu.edit_text(f"{jawaban_ai}{info_alergi}")
+            else:
+                raise parse_err
 
         # Kirim pengingat 10 detik jika status reminder aktif
         if user_data["reminder_harian"] == 1:
