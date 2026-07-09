@@ -38,8 +38,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
 )
-from google import genai
-from google.genai import types
+from openai import AsyncOpenAI
 
 # Coba import psycopg2 untuk PostgreSQL
 try:
@@ -61,18 +60,18 @@ logger = logging.getLogger(__name__)
 # Konfigurasi Token (dari Environment Variables)
 # ──────────────────────────────────────────────
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError("Environment variable TELEGRAM_TOKEN belum diset!")
-if not GEMINI_API_KEY:
-    raise RuntimeError("Environment variable GEMINI_API_KEY belum diset!")
+if not GROQ_API_KEY:
+    raise RuntimeError("Environment variable GROQ_API_KEY belum diset. Tambahkan di Railway!")
 
 # ──────────────────────────────────────────────
-# Inisialisasi Gemini Client
+# Inisialisasi Groq Client
 # ──────────────────────────────────────────────
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+ai_client = AsyncOpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
 
 # ──────────────────────────────────────────────
 # Regex untuk deteksi
@@ -1061,35 +1060,33 @@ async def proses_konsultasi(
         alergi_pengguna = user_data["alergi"]
         system_instruction = bangun_system_instruction(user_data, mood_data)
 
+        # Siapkan pesan untuk Groq API
+        messages = [{"role": "system", "content": system_instruction}]
+
         # 🧠 CHAT MEMORY — Ambil 10 chat terakhir dari database
         chat_history = ambil_chat_history(user.id, limit=10)
-        konteks_percakapan = ""
 
         if chat_history:
-            konteks_percakapan = "## RIWAYAT PERCAKAPAN SEBELUMNYA (Chat Memory):\n"
+            messages.append({"role": "system", "content": "Gunakan riwayat percakapan berikut ini untuk menjaga kesinambungan. Jangan ulangi menu yang sama, berikan variasi baru!"})
             for role, pesan_lama, waktu_lama in chat_history:
-                label = "Pengguna" if role == "user" else "Asisten AI"
-                # Batasi panjang per pesan agar tidak melebihi token limit
                 pesan_potong = pesan_lama[:300] + "..." if len(pesan_lama) > 300 else pesan_lama
-                konteks_percakapan += f"[{waktu_lama}] {label}: {pesan_potong}\n"
-            konteks_percakapan += "\nGunakan riwayat percakapan di atas untuk menjaga kesinambungan. Jangan ulangi menu yang sama, berikan variasi baru!\n\n"
+                valid_role = "user" if role == "user" else "assistant"
+                messages.append({"role": valid_role, "content": f"[{waktu_lama}] {pesan_potong}"})
 
-        prompt_final = f"{konteks_percakapan}Keluhan/pesan baru dari pengguna: {keluhan}"
+        # Tambahkan pesan baru
+        messages.append({"role": "user", "content": keluhan})
 
         # Simpan pesan user ke chat_history SEBELUM kirim ke AI
         simpan_chat(user.id, "user", keluhan)
 
-        response = gemini_client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt_final,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.2,
-                max_output_tokens=1500,
-            ),
+        response = await ai_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=messages,
+            temperature=0.2,
+            max_tokens=1500,
         )
 
-        jawaban_ai = response.text
+        jawaban_ai = response.choices[0].message.content
 
         if not jawaban_ai:
             await pesan_tunggu.edit_text("😔 Maaf, AI tidak dapat memberikan rekomendasi saat ini. Silakan coba lagi.")
@@ -1134,12 +1131,12 @@ async def proses_konsultasi(
             )
 
     except Exception as e:
-        logger.error("Error Gemini: %s", str(e))
+        logger.error("Error Groq API: %s", str(e))
         error_str = str(e)
         
-        # Intercept error Limit / Quota dari API Gemini
-        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "Quota exceeded" in error_str:
-            pesan_error = f"⏳ *Sistem sedang sibuk (Limit AI Tercapai)!*\n\nBatas penggunaan AI sedang penuh karena terlalu banyak permintaan.\n\n`(Error Code: {error_str[:150]})`"
+        # Intercept error Limit / Quota dari API Groq
+        if "429" in error_str or "RateLimitError" in error_str or "Insufficient Quota" in error_str:
+            pesan_error = "⏳ *Sistem sedang sibuk (Limit AI Tercapai)!*\n\nBatas penggunaan AI sedang penuh karena terlalu banyak permintaan. Mohon tunggu beberapa detik, lalu coba ketik keluhanmu lagi ya! 🙏"
         else:
             # Batasi panjang error teks agar Telegram tidak gagal kirim karena terlalu panjang
             pesan_error = f"❌ *Terjadi kesalahan.*\n\nDetail: `{error_str[:500]}`"
