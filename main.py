@@ -589,7 +589,7 @@ async def proses_konsultasi(
     user,
     keluhan: str,
 ) -> None:
-    """Mengirim keluhan ke Gemini AI dengan system instruction dinamis."""
+    """Mengirim keluhan ke Gemini AI dengan menyertakan memori chat terakhir dari SQLite."""
     user_data = get_or_create_user(user.id, user.first_name)
 
     pesan_tunggu = await update.message.reply_text(
@@ -601,12 +601,26 @@ async def proses_konsultasi(
         alergi_pengguna = user_data["alergi"]
         system_instruction = bangun_system_instruction(alergi_pengguna)
 
+        # Ambil riwayat percakapan terakhir (maksimal 3 riwayat terakhir) untuk memori konteks AI
+        riwayat_terakhir = ambil_riwayat(user.id, limit=3)
+        konteks_percakapan = ""
+        
+        if riwayat_terakhir:
+            konteks_percakapan = "Berikut adalah riwayat konsultasi terakhir dari pengguna ini untuk menjaga kesinambungan percakapan:\n"
+            # Urutkan dari yang terlama ke terbaru (riwayat diambil DESC, jadi kita balik)
+            for r_keluhan, r_menu, r_waktu in reversed(riwayat_terakhir):
+                konteks_percakapan += f"- Waktu: {r_waktu} | Keluhan: '{r_keluhan}' | Menu Direkomendasikan: '{r_menu}'\n"
+            konteks_percakapan += "\nGunakan informasi di atas untuk melanjutkan konsultasi jika keluhan baru ini berhubungan dengan keluhan sebelumnya. Jangan rekomendasikan menu yang sama persis jika keluhannya mirip, berikan variasi menu baru!\n\n"
+
+        # Gabungkan konteks riwayat dengan keluhan saat ini
+        prompt_final = f"{konteks_percakapan}Keluhan kesehatan baru saya saat ini: {keluhan}"
+
         response = gemini_client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=f"Keluhan kesehatan saya: {keluhan}",
+            contents=prompt_final,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
-                temperature=0.1,
+                temperature=0.2, # Sedikit dinaikkan agar variatif tapi tetap patuh
                 max_output_tokens=1024,
             ),
         )
@@ -619,7 +633,7 @@ async def proses_konsultasi(
 
         nama_menu = ekstrak_nama_menu(jawaban_ai)
 
-        # Simpan ke database
+        # Simpan ke database (riwayat & menu terakhir)
         update_menu(user.id, nama_menu)
         simpan_riwayat(user.id, keluhan, nama_menu, jawaban_ai)
 
