@@ -83,17 +83,31 @@ DB_PATH = Path(__file__).parent / "bot_data.db"
 USE_POSTGRES = HAS_POSTGRES and DATABASE_URL is not None
 
 def dapatkan_koneksi():
-    """Membuka koneksi database."""
+    """Membuka koneksi ke PostgreSQL dengan fallback otomatis ke SQLite jika gagal."""
+    global USE_POSTGRES
     if USE_POSTGRES:
-        url = urlparse.urlparse(DATABASE_URL)
-        dbname = url.path[1:]
-        user = url.username
-        password = url.password
-        host = url.hostname
-        port = url.port
-        return psycopg2.connect(
-            dbname=dbname, user=user, password=password, host=host, port=port
-        )
+        try:
+            url = urlparse.urlparse(DATABASE_URL)
+            dbname = url.path[1:]
+            user = url.username
+            password = url.password
+            host = url.hostname
+            port = url.port
+            
+            # Tambahkan timeout 5 detik agar bot tidak hang/loading tanpa batas
+            conn = psycopg2.connect(
+                dbname=dbname,
+                user=user,
+                password=password,
+                host=host,
+                port=port,
+                connect_timeout=5
+            )
+            return conn
+        except Exception as e:
+            logger.error("Gagal menyambung ke PostgreSQL, beralih otomatis ke SQLite! Error: %s", str(e))
+            USE_POSTGRES = False # Nonaktifkan postgres untuk pemanggilan selanjutnya
+            return sqlite3.connect(DB_PATH)
     else:
         return sqlite3.connect(DB_PATH)
 
