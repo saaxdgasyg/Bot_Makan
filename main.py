@@ -3,12 +3,12 @@ Bot Telegram: Asisten Nutrisi Sehat & Murah ala Indonesia
 =========================================================
 Fitur:
   - Menu Navigasi berbasis Tombol (Reply Keyboard / Inline Keyboard)
-  - Registrasi alergi TANPA slash & dengan Tombol
-  - Konsultasi kesehatan via pesan teks biasa
-  - Rekomendasi menu lokal murah dari Gemini AI dengan filter alergi ketat
-  - Pengingat otomatis 10 detik setelah konsultasi (simulasi reminder)
+  - Registrasi alergi TANPA slash & dengan Tombol (Segregasi User ID Ketat)
+  - Fitur Hitung BMI (Berat & Tinggi Badan disimpan di Database per User)
+  - Konsultasi kesehatan personal berbasis data fisik & alergi terkini
+  - Pengingat otomatis 10 detik (simulasi) + Fitur Saklar Reminder Harian
   - Database PostgreSQL (dengan auto-fallback ke SQLite untuk lokal)
-  - Fitur: Profil, Riwayat, Bantuan, Reset Data, Panduan Alergi
+  - Fitur: Profil, Riwayat, Bantuan, Reset Data, Kalkulator BMI
 """
 
 import logging
@@ -58,7 +58,7 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL") # Disediakan otomatis oleh Railway
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError("Environment variable TELEGRAM_TOKEN belum diset!")
@@ -71,12 +71,10 @@ if not GEMINI_API_KEY:
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # ──────────────────────────────────────────────
-# Regex untuk deteksi kata "alergi" / "alrgi" / "allergi" di awal pesan
+# Regex untuk deteksi
 # ──────────────────────────────────────────────
-POLA_ALERGI = re.compile(
-    r"^(?:alergi|alrgi|allergi|alerji|alergy|allergy)\s+(.+)",
-    re.IGNORECASE,
-)
+POLA_ALERGI = re.compile(r"^(?:alergi|alrgi|allergi|alerji|alergy|allergy)\s+(.+)", re.IGNORECASE)
+POLA_BMI = re.compile(r"^(?:bmi|tb|bb|berat|tinggi)\s+(\d+)\s+(\d+)", re.IGNORECASE)
 
 # ──────────────────────────────────────────────
 # Database Helper (PostgreSQL / SQLite Connection)
@@ -85,9 +83,8 @@ DB_PATH = Path(__file__).parent / "bot_data.db"
 USE_POSTGRES = HAS_POSTGRES and DATABASE_URL is not None
 
 def dapatkan_koneksi():
-    """Membuka koneksi ke PostgreSQL jika di Railway, fallback ke SQLite."""
+    """Membuka koneksi database."""
     if USE_POSTGRES:
-        # Parsing DATABASE_URL untuk psycopg2
         url = urlparse.urlparse(DATABASE_URL)
         dbname = url.path[1:]
         user = url.username
@@ -95,40 +92,37 @@ def dapatkan_koneksi():
         host = url.hostname
         port = url.port
         return psycopg2.connect(
-            dbname=dbname,
-            user=user,
-            password=password,
-            host=host,
-            port=port
+            dbname=dbname, user=user, password=password, host=host, port=port
         )
     else:
         return sqlite3.connect(DB_PATH)
 
 def dapatkan_placeholder():
-    """Placeholder query parameter: %s untuk PostgreSQL, ? untuk SQLite."""
     return "%s" if USE_POSTGRES else "?"
 
 def init_db() -> None:
-    """Membuat tabel users dan riwayat di PostgreSQL / SQLite."""
+    """Inisialisasi tabel dengan kolom tambahan BMI & status reminder."""
     conn = dapatkan_koneksi()
     cursor = conn.cursor()
 
     if USE_POSTGRES:
         logger.info("Menggunakan database PostgreSQL.")
-        # Tabel profil pengguna PostgreSQL
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
-                user_id     BIGINT PRIMARY KEY,
-                nama        VARCHAR(255) DEFAULT '',
-                alergi      TEXT         DEFAULT 'Tidak ada',
-                menu        VARCHAR(255) DEFAULT '',
-                reminder    INTEGER      DEFAULT 0,
-                bergabung   VARCHAR(50)  DEFAULT ''
+                user_id         BIGINT PRIMARY KEY,
+                nama            VARCHAR(255) DEFAULT '',
+                alergi          TEXT         DEFAULT 'Tidak ada',
+                menu            VARCHAR(255) DEFAULT '',
+                reminder        INTEGER      DEFAULT 0,
+                bergabung       VARCHAR(50)  DEFAULT '',
+                tinggi_badan    INTEGER      DEFAULT 0,
+                berat_badan     INTEGER      DEFAULT 0,
+                bmi             REAL         DEFAULT 0.0,
+                reminder_harian INTEGER      DEFAULT 1
             )
             """
         )
-        # Tabel riwayat konsultasi PostgreSQL
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS riwayat (
@@ -144,20 +138,22 @@ def init_db() -> None:
         )
     else:
         logger.info("Menggunakan database SQLite.")
-        # Tabel profil pengguna SQLite
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
-                user_id     INTEGER PRIMARY KEY,
-                nama        TEXT    DEFAULT '',
-                alergi      TEXT    DEFAULT 'Tidak ada',
-                menu        TEXT    DEFAULT '',
-                reminder    INTEGER DEFAULT 0,
-                bergabung   TEXT    DEFAULT ''
+                user_id         INTEGER PRIMARY KEY,
+                nama            TEXT    DEFAULT '',
+                alergi          TEXT    DEFAULT 'Tidak ada',
+                menu            TEXT    DEFAULT '',
+                reminder        INTEGER DEFAULT 0,
+                bergabung       TEXT    DEFAULT '',
+                tinggi_badan    INTEGER DEFAULT 0,
+                berat_badan     INTEGER DEFAULT 0,
+                bmi             REAL    DEFAULT 0.0,
+                reminder_harian INTEGER DEFAULT 1
             )
             """
         )
-        # Tabel riwayat konsultasi SQLite
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS riwayat (
@@ -172,36 +168,45 @@ def init_db() -> None:
             """
         )
 
+    # Migrasi kolom lama jika SQLite belum punya kolom baru (untuk keamanan)
+    if not USE_POSTGRES:
+        try:
+            cursor.execute("ALTER TABLE users ADD COLUMN tinggi_badan INTEGER DEFAULT 0")
+            cursor.execute("ALTER TABLE users ADD COLUMN berat_badan INTEGER DEFAULT 0")
+            cursor.execute("ALTER TABLE users ADD COLUMN bmi REAL DEFAULT 0.0")
+            cursor.execute("ALTER TABLE users ADD COLUMN reminder_harian INTEGER DEFAULT 1")
+        except sqlite3.OperationalError:
+            pass # Kolom sudah ada
+
     conn.commit()
     conn.close()
     logger.info("Database siap digunakan.")
 
 
 def get_or_create_user(user_id: int, nama: str = "") -> dict:
-    """Mengambil data user; buat baris baru jika belum ada."""
     conn = dapatkan_koneksi()
     cursor = conn.cursor()
     p = dapatkan_placeholder()
     
     cursor.execute(
-        f"SELECT user_id, nama, alergi, menu, reminder, bergabung FROM users WHERE user_id = {p}",
+        f"SELECT user_id, nama, alergi, menu, reminder, bergabung, tinggi_badan, berat_badan, bmi, reminder_harian FROM users WHERE user_id = {p}",
         (user_id,),
     )
     row = cursor.fetchone()
     if row is None:
         waktu_gabung = datetime.now().strftime("%Y-%m-%d %H:%M")
         cursor.execute(
-            f"INSERT INTO users (user_id, nama, bergabung) VALUES ({p}, {p}, {p})",
+            f"INSERT INTO users (user_id, nama, bergabung, tinggi_badan, berat_badan, bmi, reminder_harian) VALUES ({p}, {p}, {p}, 0, 0, 0.0, 1)",
             (user_id, nama, waktu_gabung),
         )
         conn.commit()
-        row = (user_id, nama, "Tidak ada", "", 0, waktu_gabung)
+        row = (user_id, nama, "Tidak ada", "", 0, waktu_gabung, 0, 0, 0.0, 1)
     elif nama and row[1] != nama:
-        # Update nama jika berubah
         cursor.execute(f"UPDATE users SET nama = {p} WHERE user_id = {p}", (nama, user_id))
         conn.commit()
-        row = (row[0], nama, row[2], row[3], row[4], row[5])
+        row = (row[0], nama, row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9])
     conn.close()
+    
     return {
         "user_id": row[0],
         "nama": row[1],
@@ -209,11 +214,14 @@ def get_or_create_user(user_id: int, nama: str = "") -> dict:
         "menu": row[3],
         "reminder": row[4],
         "bergabung": row[5],
+        "tinggi_badan": row[6],
+        "berat_badan": row[7],
+        "bmi": row[8],
+        "reminder_harian": row[9],
     }
 
 
 def update_alergi(user_id: int, alergi: str) -> None:
-    """Memperbarui daftar alergi pengguna di database."""
     conn = dapatkan_koneksi()
     cursor = conn.cursor()
     p = dapatkan_placeholder()
@@ -223,19 +231,36 @@ def update_alergi(user_id: int, alergi: str) -> None:
 
 
 def update_menu(user_id: int, menu: str) -> None:
-    """Menyimpan nama menu rekomendasi terakhir ke database."""
+    conn = dapatkan_koneksi()
+    cursor = conn.cursor()
+    p = dapatkan_placeholder()
+    cursor.execute(f"UPDATE users SET menu = {p}, reminder = 1 WHERE user_id = {p}", (menu, user_id))
+    conn.commit()
+    conn.close()
+
+
+def update_bmi_data(user_id: int, tinggi: int, berat: int, bmi: float) -> None:
     conn = dapatkan_koneksi()
     cursor = conn.cursor()
     p = dapatkan_placeholder()
     cursor.execute(
-        f"UPDATE users SET menu = {p}, reminder = 1 WHERE user_id = {p}", (menu, user_id)
+        f"UPDATE users SET tinggi_badan = {p}, berat_badan = {p}, bmi = {p} WHERE user_id = {p}",
+        (tinggi, berat, bmi, user_id),
     )
     conn.commit()
     conn.close()
 
 
+def update_reminder_harian_status(user_id: int, status: int) -> None:
+    conn = dapatkan_koneksi()
+    cursor = conn.cursor()
+    p = dapatkan_placeholder()
+    cursor.execute(f"UPDATE users SET reminder_harian = {p} WHERE user_id = {p}", (status, user_id))
+    conn.commit()
+    conn.close()
+
+
 def simpan_riwayat(user_id: int, keluhan: str, menu: str, jawaban_ai: str) -> None:
-    """Menyimpan riwayat konsultasi ke database."""
     conn = dapatkan_koneksi()
     cursor = conn.cursor()
     p = dapatkan_placeholder()
@@ -249,7 +274,6 @@ def simpan_riwayat(user_id: int, keluhan: str, menu: str, jawaban_ai: str) -> No
 
 
 def ambil_riwayat(user_id: int, limit: int = 10) -> list:
-    """Mengambil riwayat konsultasi terakhir pengguna."""
     conn = dapatkan_koneksi()
     cursor = conn.cursor()
     p = dapatkan_placeholder()
@@ -263,7 +287,6 @@ def ambil_riwayat(user_id: int, limit: int = 10) -> list:
 
 
 def hitung_total_konsultasi(user_id: int) -> int:
-    """Menghitung total konsultasi pengguna."""
     conn = dapatkan_koneksi()
     cursor = conn.cursor()
     p = dapatkan_placeholder()
@@ -274,67 +297,75 @@ def hitung_total_konsultasi(user_id: int) -> int:
 
 
 def reset_user_data(user_id: int) -> None:
-    """Menghapus semua data pengguna dari database."""
     conn = dapatkan_koneksi()
     cursor = conn.cursor()
     p = dapatkan_placeholder()
     cursor.execute(f"DELETE FROM riwayat WHERE user_id = {p}", (user_id,))
     cursor.execute(
-        f"UPDATE users SET alergi = 'Tidak ada', menu = '', reminder = 0 WHERE user_id = {p}",
+        f"UPDATE users SET alergi = 'Tidak ada', menu = '', reminder = 0, tinggi_badan = 0, berat_badan = 0, bmi = 0.0, reminder_harian = 1 WHERE user_id = {p}",
         (user_id,),
     )
     conn.commit()
     conn.close()
 
 
-# ──────────────────────────────────────────────
-# Helper — Bersihkan teks alergi
-# ──────────────────────────────────────────────
 def bersihkan_alergi(teks: str) -> str:
-    """Ubah ke huruf kecil, hapus spasi berlebih, rapikan koma."""
     teks = teks.lower().strip()
     items = [item.strip() for item in teks.split(",") if item.strip()]
     return ", ".join(items)
 
 
-# ──────────────────────────────────────────────
-# Helper — Ekstrak nama menu dari respons Gemini
-# ──────────────────────────────────────────────
 def ekstrak_nama_menu(respons: str) -> str:
-    """Mengambil nama menu secara cerdas dari respons Gemini."""
     match = re.search(r"(?:Menu|Rekomendasi Menu)\s*:\s*([^\n]+)", respons, re.IGNORECASE)
     if match:
         return match.group(1).replace("*", "").strip()
-    
-    # Fallback: ambil baris pertama yang mengandung masakan
     for line in respons.split("\n"):
         if any(keyword in line.lower() for keyword in ["tumis", "nasi", "sup", "bubur", "sayur", "rebus", "ikan", "ayam", "tahu", "tempe"]):
             return line.replace("*", "").strip()
-            
     return "Menu Sehat & Nutrisi Lokal"
 
 
-# ──────────────────────────────────────────────
-# Menu Keyboard Utama (Bawah Layar / Reply Keyboard)
-# ──────────────────────────────────────────────
 def dapatkan_keyboard_utama() -> ReplyKeyboardMarkup:
-    """Membuat keyboard menu utama di bagian bawah chat."""
     keyboard = [
         [KeyboardButton("🥗 Kelola Alergi"), KeyboardButton("👤 Profil Saya")],
-        [KeyboardButton("📋 Riwayat Menu"), KeyboardButton("📖 Bantuan & Tips")],
+        [KeyboardButton("⚖️ Hitung BMI"), KeyboardButton("📋 Riwayat Menu")],
+        [KeyboardButton("📖 Bantuan & Tips")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, placeholder_keyboard="Pilih menu atau ketik keluhan...")
+
+
+def dapatkan_kategori_bmi(bmi: float) -> str:
+    if bmi <= 0:
+        return "Belum diisi"
+    elif bmi < 18.5:
+        return "Kurus (Kurang Berat Badan) ⚠️"
+    elif bmi < 24.9:
+        return "Normal (Ideal) ✅"
+    elif bmi < 29.9:
+        return "Kelebihan Berat Badan ⚠️"
+    else:
+        return "Obesitas 🚨"
 
 
 # ──────────────────────────────────────────────
 # Bangun System Instruction dinamis untuk Gemini
 # ──────────────────────────────────────────────
-def bangun_system_instruction(alergi: str) -> str:
-    """Membuat system instruction Gemini yang fleksibel tapi tetap menyaring alergi."""
+def bangun_system_instruction(user_data: dict) -> str:
+    alergi = user_data["alergi"]
+    tb = user_data["tinggi_badan"]
+    bb = user_data["berat_badan"]
+    bmi = user_data["bmi"]
+    kategori = dapatkan_kategori_bmi(bmi)
+
+    info_fisik = f"Tinggi Badan: {tb} cm, Berat Badan: {bb} kg, BMI: {bmi:.1f} ({kategori})." if tb > 0 else "Data fisik belum diisi pengguna."
+
     instruksi = (
         "Kamu adalah seorang Dokter, Spesialis Nutrisi, dan Ahli Gizi Ramah Indonesia yang sangat berpengalaman.\n"
         "Tugasmu adalah memberikan analisis keluhan kesehatan pengguna dan memberikan rekomendasi menu sehat "
         "lokal Indonesia beserta tips gaya hidup/pola tidur medis yang sangat lengkap dan solutif. Jangan memotong penjelasan penting!\n\n"
+        "## DATA FISIK PENGGUNA SAAT INI:\n"
+        f"- {info_fisik}\n"
+        "Gunakan data fisik di atas untuk menganalisis kebutuhan kalori, porsi makan, atau anjuran nutrisi mereka secara personal.\n\n"
         "## ATURAN MUTLAK YANG WAJIB DIPATUHI:\n\n"
         "### 1. RENCANA MENU HARUS MURAH & LOKAL INDONESIA\n"
         "- Gunakan bahan makanan lokal yang terjangkau di pasar tradisional (tahu, tempe, telur, bayam, kangkung, daun kelor, hati ayam, pisang, pepaya, ubi, singkong, kacang hijau, lele, ikan teri, dll).\n"
@@ -354,7 +385,7 @@ def bangun_system_instruction(alergi: str) -> str:
         "\n### 3. FORMAT RESPON (LENGKAP & DETAIL)\n"
         "Jawab dengan struktur rapi berikut:\n\n"
         "🩺 *ANALISIS MEDIS & KELUHAN*\n"
-        "[Berikan penjelasan medis singkat mengenai keluhan mereka (misal: kenapa susah tidur, bagaimana cara menambah berat badan di umur mereka, dll). Berikan saran medis yang jelas dan solutif!]\n\n"
+        "[Berikan penjelasan medis singkat mengenai keluhan mereka (misal: kenapa susah tidur, bagaimana cara menambah berat badan sesuai data fisiknya di umur mereka, dll). Berikan saran medis yang jelas dan solutif!]\n\n"
         "🍽️ *REKOMENDASI MENU SEHAT*\n"
         "Menu: [Nama Masakan Indonesia yang Spesifik]\n"
         "Bahan: [Bahan-bahan utama yang murah dan lokal]\n"
@@ -373,7 +404,6 @@ def bangun_system_instruction(alergi: str) -> str:
 # HANDLER — /start
 # ══════════════════════════════════════════════
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Menyapa pengguna dan menampilkan menu keyboard utama."""
     user = update.effective_user
     get_or_create_user(user.id, user.first_name)
 
@@ -395,7 +425,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # HANDLER — Kelola Alergi (Inline Keyboard)
 # ══════════════════════════════════════════════
 async def kelola_alergi_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Menampilkan pilihan kelola alergi dengan tombol inline."""
     user = update.effective_user
     user_data = get_or_create_user(user.id, user.first_name)
 
@@ -432,7 +461,6 @@ async def kelola_alergi_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # CALLBACK HANDLER — Proses Klik Tombol Alergi
 # ══════════════════════════════════════════════
 async def callback_alergi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Memproses callback query dari tombol inline alergi."""
     query = update.callback_query
     user = query.from_user
     user_data = get_or_create_user(user.id, user.first_name)
@@ -469,10 +497,22 @@ async def callback_alergi(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 # ══════════════════════════════════════════════
+# HANDLER — Hitung BMI
+# ══════════════════════════════════════════════
+async def hitung_bmi_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    pesan = (
+        "⚖️ *KALKULATOR BMI INDONESIA*\n\n"
+        "Untuk menghitung Indeks Massa Tubuh (BMI) Anda, silakan ketik langsung di chat dengan format:\n\n"
+        "`bmi [Tinggi Badan dalam cm] [Berat Badan dalam kg]`\n\n"
+        "Contoh: `bmi 160 45`"
+    )
+    await update.message.reply_text(pesan, parse_mode="Markdown")
+
+
+# ══════════════════════════════════════════════
 # HANDLER — Profil
 # ══════════════════════════════════════════════
 async def profil_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Menampilkan profil pengguna."""
     user = update.effective_user
     user_data = get_or_create_user(user.id, user.first_name)
     total_konsultasi = hitung_total_konsultasi(user.id)
@@ -485,10 +525,22 @@ async def profil_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     else:
         alergi_display = "  ✅ Tidak ada alergi tercatat"
 
-    menu_terakhir = user_data["menu"] if user_data["menu"] else "Belum ada konsultasi"
+    menu_terakhir = user_data["menu"] if user_data["menu"] else "Belum ada"
+    
+    tb = user_data["tinggi_badan"]
+    bb = user_data["berat_badan"]
+    bmi = user_data["bmi"]
+    kategori = dapatkan_kategori_bmi(bmi)
+    status_fisik = f"{tb} cm / {bb} kg\n📊 Kategori: *{kategori}*" if tb > 0 else "Belum diisi (Ketik `bmi 160 45` untuk mengisi)"
 
-    # Tombol hapus riwayat & profil
-    keyboard = [[InlineKeyboardButton("🗑️ Hapus Riwayat & Data", callback_data="confirm_reset")]]
+    # Saklar Reminder Harian
+    status_rem = "🔔 Aktif" if user_data["reminder_harian"] == 1 else "🔕 Nonaktif"
+    callback_rem = "toggle_reminder_0" if user_data["reminder_harian"] == 1 else "toggle_reminder_1"
+
+    keyboard = [
+        [InlineKeyboardButton(f"Reminder Harian: {status_rem}", callback_data=callback_rem)],
+        [InlineKeyboardButton("🗑️ Hapus Semua Data", callback_data="confirm_reset")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     pesan = (
@@ -498,6 +550,8 @@ async def profil_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"🆔 User ID: `{user.id}`\n"
         f"📅 Bergabung: {user_data['bergabung']}\n"
         f"📊 Total Konsultasi: *{total_konsultasi} kali*\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚖️ *Status Fisik & BMI:*\n  {status_fisik}\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"🧬 *Daftar Alergi:*\n{alergi_display}\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
@@ -509,10 +563,9 @@ async def profil_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 # ══════════════════════════════════════════════
-# CALLBACK HANDLER — Reset Data via Profil
+# CALLBACK HANDLER — Reset & Toggle Reminder
 # ══════════════════════════════════════════════
-async def callback_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Konfirmasi dan lakukan reset data pengguna."""
+async def callback_misc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user = query.from_user
     await query.answer()
@@ -520,7 +573,15 @@ async def callback_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if query.data == "confirm_reset":
         reset_user_data(user.id)
         await query.edit_message_text(
-            "🗑️ *Semua data profil & riwayat konsultasi kamu berhasil dihapus bersih!*",
+            "🗑️ *Semua data profil, data fisik BMI, dan riwayat konsultasi kamu berhasil dihapus bersih!*",
+            parse_mode="Markdown",
+        )
+    elif query.data.startswith("toggle_reminder_"):
+        status_baru = int(query.data.replace("toggle_reminder_", ""))
+        update_reminder_harian_status(user.id, status_baru)
+        status_txt = "diaktifkan" if status_baru == 1 else "dinonaktifkan"
+        await query.edit_message_text(
+            f"✅ *Pengingat makan harian berhasil {status_txt}!*",
             parse_mode="Markdown",
         )
 
@@ -529,7 +590,6 @@ async def callback_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # HANDLER — Riwayat
 # ══════════════════════════════════════════════
 async def riwayat_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Menampilkan riwayat konsultasi."""
     user = update.effective_user
     rows = ambil_riwayat(user.id, limit=5)
 
@@ -558,26 +618,23 @@ async def riwayat_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # HANDLER — Bantuan & Tips
 # ══════════════════════════════════════════════
 async def bantuan_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Menampilkan panduan penggunaan dan tips kesehatan."""
     pesan = (
         "📖 *PANDUAN & TIPS KESEHATAN*\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "🥗 *CARA KONSULTASI:*\n"
         "Cukup ketik langsung keluhan kesehatanmu di chat ini. Contoh:\n"
         "• _'Badan saya lemas dan kurang darah'_\n"
-        "• _'Rekomendasi makanan untuk penderita maag'_\n"
-        "• _'Menu sehat murah peningkat nafsu makan anak'_\n\n"
+        "• _'Rekomendasi makanan untuk penderita maag'_\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "⚖️ *PENGISIAN DATA FISIK (BMI):*\n"
+        "Ketik di chat: `bmi [Tinggi cm] [Berat kg]`\n"
+        "Contoh: `bmi 165 50`\n"
+        "Data ini membantu AI memberi rekomendasi gizi yang pas!\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "🧬 *CARA SET ALERGI:*\n"
         "1. Klik tombol *🥗 Kelola Alergi* di bawah.\n"
         "2. Pilih alergi instan dengan tombol yang tersedia,\n"
-        "3. Atau ketik manual di chat: `alergi telur, udang, susu`.\n"
-        "4. Reset alergi kapan saja dengan tombol *Hapus Semua Alergi*.\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "💡 *Tips Makan Sehat & Hemat:*\n"
-        "• Selalu utamakan bahan berprotein lokal seperti Tempe dan Tahu yang kaya protein nabati.\n"
-        "• Konsumsi sayur daun kelor atau bayam sebagai sumber zat besi alami termurah.\n"
-        "• Hindari makanan olahan instan berlebih agar tubuh tetap prima!"
+        "3. Atau ketik manual di chat: `alergi telur, udang, susu`."
     )
     await update.message.reply_text(pesan, parse_mode="Markdown")
 
@@ -586,7 +643,6 @@ async def bantuan_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # CALLBACK — Pengingat Otomatis (Job Queue)
 # ══════════════════════════════════════════════
 async def kirim_pengingat(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Mengirim pesan pengingat setelah 10 detik."""
     job = context.job
     chat_id = job.chat_id
     nama_menu = job.data
@@ -597,26 +653,27 @@ async def kirim_pengingat(context: ContextTypes.DEFAULT_TYPE) -> None:
         f"🍽️ *{nama_menu}*\n\n"
         "Tetap semangat dan jaga kesehatan ya! 💪🌿"
     )
-
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=pesan_pengingat,
-        parse_mode="Markdown",
-    )
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=pesan_pengingat,
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        logger.error("Gagal mengirim pengingat ke user %s: %s", chat_id, str(e))
 
 
 # ══════════════════════════════════════════════
-# HANDLER — Pesan Teks Utama (Menangani Teks Biasa/Tombol Menu/Alergi)
+# HANDLER — Pesan Teks Utama (Menangani Teks Biasa/Tombol Menu/Alergi/BMI)
 # ══════════════════════════════════════════════
 async def pesan_teks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Menerima input dari pengguna, baik klik tombol keyboard maupun ketik manual."""
     user = update.effective_user
     teks = update.message.text.strip()
 
     if not teks:
         return
 
-    # 1. Hubungkan tombol menu keyboard utama ke fungsi masing-masing
+    # 1. Hubungkan tombol menu keyboard utama
     if teks == "🥗 Kelola Alergi":
         await kelola_alergi_menu(update, context)
         return
@@ -629,11 +686,14 @@ async def pesan_teks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif teks == "📖 Bantuan & Tips":
         await bantuan_menu(update, context)
         return
+    elif teks == "⚖️ Hitung BMI":
+        await hitung_bmi_menu(update, context)
+        return
 
     # 2. Cek apakah pengguna mengetik format pendaftaran alergi manual
-    cocok = POLA_ALERGI.match(teks)
-    if cocok:
-        teks_alergi = cocok.group(1).strip()
+    cocok_alergi = POLA_ALERGI.match(teks)
+    if cocok_alergi:
+        teks_alergi = cocok_alergi.group(1).strip()
         get_or_create_user(user.id, user.first_name)
 
         if teks_alergi.lower() in ("tidak ada", "tidak", "none", "reset", "hapus", "kosong", "ga ada"):
@@ -649,7 +709,33 @@ async def pesan_teks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    # 3. Selain itu, proses sebagai konsultasi kesehatan
+    # 3. Cek apakah pengguna mengetik format BMI manual
+    cocok_bmi = POLA_BMI.match(teks)
+    if cocok_bmi:
+        tinggi = int(cocok_bmi.group(1))
+        berat = int(cocok_bmi.group(2))
+        get_or_create_user(user.id, user.first_name)
+        
+        if tinggi > 0 and berat > 0:
+            tinggi_meter = tinggi / 100.0
+            bmi_val = berat / (tinggi_meter * tinggi_meter)
+            update_bmi_data(user.id, tinggi, berat, bmi_val)
+            kategori = dapatkan_kategori_bmi(bmi_val)
+            
+            await update.message.reply_text(
+                f"✅ *Data fisik berhasil disimpan!*\n\n"
+                f"📏 Tinggi: *{tinggi} cm*\n"
+                f"⚖️ Berat: *{berat} kg*\n"
+                f"📊 Indeks Massa Tubuh (BMI): *{bmi_val:.1f}*\n"
+                f"⚠️ Status: *{kategori}*\n\n"
+                f"AI akan menyesuaikan semua menu nutrisi berdasarkan data fisik ini!",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text("⚠️ Angka berat/tinggi harus lebih besar dari 0.")
+        return
+
+    # 4. Selain itu, proses sebagai konsultasi kesehatan
     await proses_konsultasi(update, context, user, teks)
 
 
@@ -662,7 +748,6 @@ async def proses_konsultasi(
     user,
     keluhan: str,
 ) -> None:
-    """Mengirim keluhan ke Gemini AI dengan menyertakan memori chat terakhir dari SQLite/PostgreSQL."""
     user_data = get_or_create_user(user.id, user.first_name)
 
     pesan_tunggu = await update.message.reply_text(
@@ -672,9 +757,9 @@ async def proses_konsultasi(
 
     try:
         alergi_pengguna = user_data["alergi"]
-        system_instruction = bangun_system_instruction(alergi_pengguna)
+        system_instruction = bangun_system_instruction(user_data)
 
-        # Ambil riwayat percakapan terakhir (maksimal 3 riwayat terakhir) untuk memori konteks AI
+        # Ambil riwayat percakapan terakhir (maksimal 3 riwayat terakhir)
         riwayat_terakhir = ambil_riwayat(user.id, limit=3)
         konteks_percakapan = ""
         
@@ -704,7 +789,6 @@ async def proses_konsultasi(
 
         nama_menu = ekstrak_nama_menu(jawaban_ai)
 
-        # Simpan ke database (riwayat & menu terakhir)
         update_menu(user.id, nama_menu)
         simpan_riwayat(user.id, keluhan, nama_menu, jawaban_ai)
 
@@ -716,18 +800,20 @@ async def proses_konsultasi(
 
         await pesan_tunggu.edit_text(f"{jawaban_ai}{info_alergi}", parse_mode="Markdown")
 
-        # Hapus pengingat lama jika ada, lalu jadwalkan yang baru (10 detik)
-        jobs_lama = context.job_queue.get_jobs_by_name(f"reminder_{user.id}")
-        for job in jobs_lama:
-            job.schedule_removal()
+        # Kirim pengingat 10 detik jika status reminder aktif
+        if user_data["reminder_harian"] == 1:
+            # Hapus job lama
+            jobs_lama = context.job_queue.get_jobs_by_name(f"reminder_{user.id}")
+            for job in jobs_lama:
+                job.schedule_removal()
 
-        context.job_queue.run_once(
-            callback=kirim_pengingat,
-            when=10,
-            chat_id=update.effective_chat.id,
-            name=f"reminder_{user.id}",
-            data=nama_menu,
-        )
+            context.job_queue.run_once(
+                callback=kirim_pengingat,
+                when=10,
+                chat_id=update.effective_chat.id,
+                name=f"reminder_{user.id}",
+                data=nama_menu,
+            )
 
     except Exception as e:
         logger.error("Error Gemini: %s", str(e))
@@ -741,7 +827,6 @@ async def proses_konsultasi(
 # MAIN — Jalankan Bot
 # ══════════════════════════════════════════════
 def main() -> None:
-    """Fungsi utama untuk menjalankan bot Telegram."""
     init_db()
 
     application = (
@@ -750,15 +835,13 @@ def main() -> None:
         .build()
     )
 
-    # Handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(callback_alergi, pattern="^(set_alergi_|reset_alergi)"))
-    application.add_handler(CallbackQueryHandler(callback_reset, pattern="^confirm_reset$"))
+    application.add_handler(CallbackQueryHandler(callback_misc, pattern="^(confirm_reset|toggle_reminder_)"))
     
-    # Menangani semua teks (baik klik tombol keyboard utama maupun input bebas)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, pesan_teks_handler))
 
-    logger.info("Bot berjalan dengan fitur tombol navigasi instan!")
+    logger.info("Bot berjalan dengan fitur pemisahan user ID ketat & hitung BMI!")
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
