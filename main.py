@@ -230,6 +230,9 @@ def init_db() -> None:
             """)
 
         # Migrasi kolom — tambahkan kolom baru jika belum ada (PostgreSQL & SQLite)
+        # Commit dulu CREATE TABLE di atas agar tidak ikut ke-rollback jika ALTER TABLE gagal
+        conn.commit()
+        
         kolom_baru = [
             ("tinggi_badan", "INTEGER DEFAULT 0"),
             ("berat_badan", "INTEGER DEFAULT 0"),
@@ -239,11 +242,12 @@ def init_db() -> None:
         for kolom, tipe in kolom_baru:
             try:
                 cursor.execute(f"ALTER TABLE users ADD COLUMN {kolom} {tipe}")
+                conn.commit()
                 logger.info("Kolom '%s' berhasil ditambahkan ke tabel users.", kolom)
             except Exception:
+                conn.rollback()
                 pass  # Kolom sudah ada, abaikan
 
-        conn.commit()
         conn.close()
         logger.info("Database siap digunakan.")
     except Exception as e:
