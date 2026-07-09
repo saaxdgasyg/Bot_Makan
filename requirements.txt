@@ -1,2 +1,2 @@
-python-telegram-bot[job-queue]==21.12
+python-telegram-bot[job-queue]==21.11.1
 google-genai==1.20.0
