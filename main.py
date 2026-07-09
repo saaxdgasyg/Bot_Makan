@@ -159,39 +159,39 @@ def init_db() -> None:
                 )
                 """
             )
-    else:
-        logger.info("Menggunakan database SQLite.")
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                user_id         INTEGER PRIMARY KEY,
-                nama            TEXT    DEFAULT '',
-                alergi          TEXT    DEFAULT 'Tidak ada',
-                menu            TEXT    DEFAULT '',
-                reminder        INTEGER DEFAULT 0,
-                bergabung       TEXT    DEFAULT '',
-                tinggi_badan    INTEGER DEFAULT 0,
-                berat_badan     INTEGER DEFAULT 0,
-                bmi             REAL    DEFAULT 0.0,
-                reminder_harian INTEGER DEFAULT 1
+        else:
+            logger.info("Menggunakan database SQLite.")
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id         INTEGER PRIMARY KEY,
+                    nama            TEXT    DEFAULT '',
+                    alergi          TEXT    DEFAULT 'Tidak ada',
+                    menu            TEXT    DEFAULT '',
+                    reminder        INTEGER DEFAULT 0,
+                    bergabung       TEXT    DEFAULT '',
+                    tinggi_badan    INTEGER DEFAULT 0,
+                    berat_badan     INTEGER DEFAULT 0,
+                    bmi             REAL    DEFAULT 0.0,
+                    reminder_harian INTEGER DEFAULT 1
+                )
+                """
             )
-            """
-        )
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS riwayat (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id     INTEGER NOT NULL,
-                keluhan     TEXT    NOT NULL,
-                menu        TEXT    NOT NULL,
-                jawaban_ai  TEXT    NOT NULL,
-                waktu       TEXT    NOT NULL,
-                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS riwayat (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id     INTEGER NOT NULL,
+                    keluhan     TEXT    NOT NULL,
+                    menu        TEXT    NOT NULL,
+                    jawaban_ai  TEXT    NOT NULL,
+                    waktu       TEXT    NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                )
+                """
             )
-            """
-        )
 
-    # Migrasi kolom — tambahkan kolom baru jika belum ada (PostgreSQL & SQLite)
+        # Migrasi kolom — tambahkan kolom baru jika belum ada (PostgreSQL & SQLite)
         kolom_baru = [
             ("tinggi_badan", "INTEGER DEFAULT 0"),
             ("berat_badan", "INTEGER DEFAULT 0"),
