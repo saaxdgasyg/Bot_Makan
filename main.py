@@ -1139,7 +1139,7 @@ async def proses_konsultasi(
         
         # Intercept error Limit / Quota dari API Gemini
         if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "Quota exceeded" in error_str:
-            pesan_error = "⏳ *Sistem sedang sibuk (Limit AI Tercapai)!*\n\nBatas penggunaan AI sedang penuh karena terlalu banyak permintaan. Mohon tunggu beberapa detik, lalu coba ketik keluhanmu lagi ya! 🙏"
+            pesan_error = f"⏳ *Sistem sedang sibuk (Limit AI Tercapai)!*\n\nBatas penggunaan AI sedang penuh. \n\nDetail teknis: `{error_str[:500]}`"
         else:
             # Batasi panjang error teks agar Telegram tidak gagal kirim karena terlalu panjang
             pesan_error = f"❌ *Terjadi kesalahan.*\n\nDetail: `{error_str[:500]}`"
