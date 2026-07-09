@@ -481,7 +481,7 @@ def dapatkan_keyboard_utama() -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton("🥗 Kelola Alergi"), KeyboardButton("👤 Profil Saya")],
         [KeyboardButton("⚖️ Hitung BMI"), KeyboardButton("📋 Riwayat Menu")],
-        [KeyboardButton("😊 Mood Hari Ini"), KeyboardButton("💧 Pengingat Minum")],
+        [KeyboardButton("😊 Mood Hari Ini"), KeyboardButton("🍽️ Jadwal Makan & Minum")],
         [KeyboardButton("📖 Bantuan & Tips")],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, input_field_placeholder="Ketik keluhan kesehatan atau pilih menu...")
@@ -847,26 +847,26 @@ async def pengingat_minum_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
     pesan = (
-        "💧 *PENGINGAT MINUM AIR*\n\n"
+        "🍽️ *JADWAL MAKAN & MINUM SEHAT*\n\n"
         f"{info_air}"
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        "📋 *Tips Hidrasi Sehat:*\n"
-        "• Minum segelas air putih segera setelah bangun tidur 🌅\n"
-        "• Minum sebelum merasa haus — haus artinya sudah mulai dehidrasi\n"
-        "• Bawa botol minum ke mana-mana 🧴\n"
-        "• Kurangi minuman manis & berkafein berlebihan\n"
-        "• Air kelapa muda & infused water juga sangat baik!\n\n"
+        "⏰ *Jadwal Makan Ideal:*\n"
+        "• 07:00 - 08:00 — Sarapan (Penting untuk energi awal!)\n"
+        "• 10:00 - 10:30 — Camilan Sehat Pagi (Buah/Kacang)\n"
+        "• 12:00 - 13:00 — Makan Siang (Protein & Karbohidrat seimbang)\n"
+        "• 15:30 - 16:00 — Camilan Sore (Yogurt/Smoothie)\n"
+        "• 18:30 - 19:30 — Makan Malam (Hindari makan berat menjelang tidur)\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        "⏰ *Jadwal Minum Ideal:*\n"
-        "• 06:00 — Bangun tidur (1 gelas)\n"
-        "• 08:00 — Sebelum sarapan (1 gelas)\n"
+        "💧 *Jadwal Minum Ideal:*\n"
+        "• 06:00 — Bangun tidur (1-2 gelas)\n"
+        "• 08:00 — Setelah sarapan (1 gelas)\n"
         "• 10:00 — Pagi hari (1 gelas)\n"
         "• 12:00 — Sebelum makan siang (1 gelas)\n"
         "• 14:00 — Siang hari (1 gelas)\n"
         "• 16:00 — Sore hari (1 gelas)\n"
         "• 18:00 — Sebelum makan malam (1 gelas)\n"
         "• 20:00 — Malam hari (1 gelas)\n\n"
-        "💪 _Yuk, jaga hidrasi tubuhmu hari ini!_"
+        "💪 _Pola makan teratur + Hidrasi cukup = Kunci Kesehatan!_"
     )
 
     await update.message.reply_text(pesan, parse_mode="Markdown")
@@ -986,7 +986,7 @@ async def pesan_teks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif teks == "😊 Mood Hari Ini":
         await mood_menu(update, context)
         return
-    elif teks == "💧 Pengingat Minum":
+    elif teks == "🍽️ Jadwal Makan & Minum":
         await pengingat_minum_menu(update, context)
         return
 
