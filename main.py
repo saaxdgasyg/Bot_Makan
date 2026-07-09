@@ -230,48 +230,36 @@ def bersihkan_alergi(teks: str) -> str:
 # Helper — Ekstrak nama menu dari respons Gemini
 # ──────────────────────────────────────────────
 def ekstrak_nama_menu(respons: str) -> str:
-    """Mengambil nama menu dari baris 'Menu: ...' di respons Gemini."""
-    match = re.search(r"Menu\s*:\s*(.+)", respons)
+    """Mengambil nama menu secara cerdas dari respons Gemini."""
+    # Cari pola "Menu: Nama Menu" atau "* Menu: Nama Menu"
+    match = re.search(r"(?:Menu|Rekomendasi Menu)\s*:\s*([^\n]+)", respons, re.IGNORECASE)
     if match:
-        return match.group(1).strip()
-    return "Menu Sehat Hari Ini"
-
-
-# ──────────────────────────────────────────────
-# Menu Keyboard Utama (Bawah Layar / Reply Keyboard)
-# ──────────────────────────────────────────────
-def dapatkan_keyboard_utama() -> ReplyKeyboardMarkup:
-    """Membuat keyboard menu utama di bagian bawah chat."""
-    keyboard = [
-        [KeyboardButton("🥗 Kelola Alergi"), KeyboardButton("👤 Profil Saya")],
-        [KeyboardButton("📋 Riwayat Menu"), KeyboardButton("📖 Bantuan & Tips")],
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, placeholder_keyboard="Pilih menu atau ketik keluhan...")
+        return match.group(1).replace("*", "").strip()
+    
+    # Fallback: ambil baris pertama yang mengandung masakan
+    for line in respons.split("\n"):
+        if any(keyword in line.lower() for keyword in ["tumis", "nasi", "sup", "bubur", "sayur", "rebus", "ikan", "ayam", "tahu", "tempe"]):
+            return line.replace("*", "").strip()
+            
+    return "Menu Sehat & Nutrisi Lokal"
 
 
 # ──────────────────────────────────────────────
 # Bangun System Instruction dinamis untuk Gemini
 # ──────────────────────────────────────────────
 def bangun_system_instruction(alergi: str) -> str:
-    """Membuat system instruction Gemini yang menyertakan data alergi pengguna."""
+    """Membuat system instruction Gemini yang fleksibel tapi tetap menyaring alergi."""
     instruksi = (
-        "Kamu adalah seorang Dokter & Ahli Gizi Ramah Indonesia yang sangat berpengalaman. "
-        "Tugasmu adalah memberikan rekomendasi menu makanan sehat untuk mengatasi keluhan "
-        "kesehatan pengguna.\n\n"
+        "Kamu adalah seorang Dokter, Spesialis Nutrisi, dan Ahli Gizi Ramah Indonesia yang sangat berpengalaman.\n"
+        "Tugasmu adalah memberikan analisis keluhan kesehatan pengguna dan memberikan rekomendasi menu sehat "
+        "lokal Indonesia beserta tips gaya hidup/pola tidur medis yang sangat lengkap dan solutif. Jangan memotong penjelasan penting!\n\n"
         "## ATURAN MUTLAK YANG WAJIB DIPATUHI:\n\n"
-        "### 1. MENU HARUS MURAH & LOKAL INDONESIA\n"
-        "- WAJIB gunakan bahan makanan lokal Indonesia yang terjangkau dan mudah ditemukan "
-        "di pasar tradisional, seperti: tahu, tempe, telur, bayam, kangkung, daun kelor, "
-        "hati ayam, ikan lele, ikan teri, nasi merah, jagung, singkong, ubi jalar, pepaya, "
-        "pisang, jeruk lokal, kacang hijau, kedelai, wortel, labu kuning, tomat, daun "
-        "singkong, terong, sawi hijau, tauge, brokoli lokal, dan sejenisnya.\n"
-        "- DILARANG KERAS merekomendasikan bahan impor mahal seperti: salmon, tuna segar "
-        "premium, blueberry, raspberry, strawberry impor, quinoa, oatmeal, asparagus, "
-        "avocado impor, chia seed, flaxseed, acai berry, kale impor, edamame frozen impor, "
-        "Greek yogurt, granola, almond butter, macadamia, atau bahan mahal sejenis.\n"
-        "- Seluruh bahan harus bisa dibeli dengan total Rp 5.000 - Rp 25.000.\n\n"
+        "### 1. RENCANA MENU HARUS MURAH & LOKAL INDONESIA\n"
+        "- Gunakan bahan makanan lokal yang terjangkau di pasar tradisional (tahu, tempe, telur, bayam, kangkung, daun kelor, hati ayam, pisang, pepaya, ubi, singkong, kacang hijau, lele, ikan teri, dll).\n"
+        "- DILARANG keras menyarankan bahan impor mahal seperti salmon, tuna segar premium, blueberry, quinoa, oatmeal, asparagus, chia seed, dll.\n"
+        "- Estimasi total harga bahan harus ramah kantong (Rp 5.000 - Rp 25.000).\n\n"
         "### 2. FILTER ALERGI KETAT\n"
-        f"- Pengguna ini memiliki ALERGI terhadap: **{alergi}**.\n"
+        f"- Pengguna memiliki ALERGI terhadap: **{alergi}**.\n"
     )
 
     if alergi.lower() != "tidak ada":
