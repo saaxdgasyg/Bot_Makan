@@ -7,7 +7,7 @@ Fitur:
   - Konsultasi kesehatan via pesan teks biasa
   - Rekomendasi menu lokal murah dari Gemini AI dengan filter alergi ketat
   - Pengingat otomatis 10 detik setelah konsultasi (simulasi reminder)
-  - Database SQLite lengkap (profil user, alergi, riwayat konsultasi)
+  - Database PostgreSQL (dengan auto-fallback ke SQLite untuk lokal)
   - Fitur: Profil, Riwayat, Bantuan, Reset Data, Panduan Alergi
 """
 
@@ -17,6 +17,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
+import urllib.parse as urlparse
 
 from telegram import (
     Update,
@@ -36,6 +37,13 @@ from telegram.ext import (
 from google import genai
 from google.genai import types
 
+# Coba import psycopg2 untuk PostgreSQL
+try:
+    import psycopg2
+    HAS_POSTGRES = True
+except ImportError:
+    HAS_POSTGRES = False
+
 # ──────────────────────────────────────────────
 # Logging
 # ──────────────────────────────────────────────
@@ -50,6 +58,7 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL") # Disediakan otomatis oleh Railway
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError("Environment variable TELEGRAM_TOKEN belum diset!")
@@ -70,70 +79,126 @@ POLA_ALERGI = re.compile(
 )
 
 # ──────────────────────────────────────────────
-# SQLite — Inisialisasi Database
+# Database Helper (PostgreSQL / SQLite Connection)
 # ──────────────────────────────────────────────
 DB_PATH = Path(__file__).parent / "bot_data.db"
+USE_POSTGRES = HAS_POSTGRES and DATABASE_URL is not None
 
+def dapatkan_koneksi():
+    """Membuka koneksi ke PostgreSQL jika di Railway, fallback ke SQLite."""
+    if USE_POSTGRES:
+        # Parsing DATABASE_URL untuk psycopg2
+        url = urlparse.urlparse(DATABASE_URL)
+        dbname = url.path[1:]
+        user = url.username
+        password = url.password
+        host = url.hostname
+        port = url.port
+        return psycopg2.connect(
+            dbname=dbname,
+            user=user,
+            password=password,
+            host=host,
+            port=port
+        )
+    else:
+        return sqlite3.connect(DB_PATH)
+
+def dapatkan_placeholder():
+    """Placeholder query parameter: %s untuk PostgreSQL, ? untuk SQLite."""
+    return "%s" if USE_POSTGRES else "?"
 
 def init_db() -> None:
-    """Membuat tabel users dan riwayat jika belum ada."""
-    conn = sqlite3.connect(DB_PATH)
+    """Membuat tabel users dan riwayat di PostgreSQL / SQLite."""
+    conn = dapatkan_koneksi()
     cursor = conn.cursor()
 
-    # Tabel profil pengguna
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            user_id     INTEGER PRIMARY KEY,
-            nama        TEXT    DEFAULT '',
-            alergi      TEXT    DEFAULT 'Tidak ada',
-            menu        TEXT    DEFAULT '',
-            reminder    INTEGER DEFAULT 0,
-            bergabung   TEXT    DEFAULT ''
+    if USE_POSTGRES:
+        logger.info("Menggunakan database PostgreSQL.")
+        # Tabel profil pengguna PostgreSQL
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id     BIGINT PRIMARY KEY,
+                nama        VARCHAR(255) DEFAULT '',
+                alergi      TEXT         DEFAULT 'Tidak ada',
+                menu        VARCHAR(255) DEFAULT '',
+                reminder    INTEGER      DEFAULT 0,
+                bergabung   VARCHAR(50)  DEFAULT ''
+            )
+            """
         )
-        """
-    )
-
-    # Tabel riwayat konsultasi
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS riwayat (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id     INTEGER NOT NULL,
-            keluhan     TEXT    NOT NULL,
-            menu        TEXT    NOT NULL,
-            jawaban_ai  TEXT    NOT NULL,
-            waktu       TEXT    NOT NULL,
-            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        # Tabel riwayat konsultasi PostgreSQL
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS riwayat (
+                id          SERIAL PRIMARY KEY,
+                user_id     BIGINT NOT NULL,
+                keluhan     TEXT NOT NULL,
+                menu        VARCHAR(255) NOT NULL,
+                jawaban_ai  TEXT NOT NULL,
+                waktu       VARCHAR(50) NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            )
+            """
         )
-        """
-    )
+    else:
+        logger.info("Menggunakan database SQLite.")
+        # Tabel profil pengguna SQLite
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id     INTEGER PRIMARY KEY,
+                nama        TEXT    DEFAULT '',
+                alergi      TEXT    DEFAULT 'Tidak ada',
+                menu        TEXT    DEFAULT '',
+                reminder    INTEGER DEFAULT 0,
+                bergabung   TEXT    DEFAULT ''
+            )
+            """
+        )
+        # Tabel riwayat konsultasi SQLite
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS riwayat (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     INTEGER NOT NULL,
+                keluhan     TEXT    NOT NULL,
+                menu        TEXT    NOT NULL,
+                jawaban_ai  TEXT    NOT NULL,
+                waktu       TEXT    NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            )
+            """
+        )
 
     conn.commit()
     conn.close()
-    logger.info("Database SQLite siap digunakan (tabel users + riwayat).")
+    logger.info("Database siap digunakan.")
 
 
 def get_or_create_user(user_id: int, nama: str = "") -> dict:
     """Mengambil data user; buat baris baru jika belum ada."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = dapatkan_koneksi()
     cursor = conn.cursor()
+    p = dapatkan_placeholder()
+    
     cursor.execute(
-        "SELECT user_id, nama, alergi, menu, reminder, bergabung FROM users WHERE user_id = ?",
+        f"SELECT user_id, nama, alergi, menu, reminder, bergabung FROM users WHERE user_id = {p}",
         (user_id,),
     )
     row = cursor.fetchone()
     if row is None:
         waktu_gabung = datetime.now().strftime("%Y-%m-%d %H:%M")
         cursor.execute(
-            "INSERT INTO users (user_id, nama, bergabung) VALUES (?, ?, ?)",
+            f"INSERT INTO users (user_id, nama, bergabung) VALUES ({p}, {p}, {p})",
             (user_id, nama, waktu_gabung),
         )
         conn.commit()
         row = (user_id, nama, "Tidak ada", "", 0, waktu_gabung)
     elif nama and row[1] != nama:
         # Update nama jika berubah
-        cursor.execute("UPDATE users SET nama = ? WHERE user_id = ?", (nama, user_id))
+        cursor.execute(f"UPDATE users SET nama = {p} WHERE user_id = {p}", (nama, user_id))
         conn.commit()
         row = (row[0], nama, row[2], row[3], row[4], row[5])
     conn.close()
@@ -149,19 +214,21 @@ def get_or_create_user(user_id: int, nama: str = "") -> dict:
 
 def update_alergi(user_id: int, alergi: str) -> None:
     """Memperbarui daftar alergi pengguna di database."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = dapatkan_koneksi()
     cursor = conn.cursor()
-    cursor.execute("UPDATE users SET alergi = ? WHERE user_id = ?", (alergi, user_id))
+    p = dapatkan_placeholder()
+    cursor.execute(f"UPDATE users SET alergi = {p} WHERE user_id = {p}", (alergi, user_id))
     conn.commit()
     conn.close()
 
 
 def update_menu(user_id: int, menu: str) -> None:
     """Menyimpan nama menu rekomendasi terakhir ke database."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = dapatkan_koneksi()
     cursor = conn.cursor()
+    p = dapatkan_placeholder()
     cursor.execute(
-        "UPDATE users SET menu = ?, reminder = 1 WHERE user_id = ?", (menu, user_id)
+        f"UPDATE users SET menu = {p}, reminder = 1 WHERE user_id = {p}", (menu, user_id)
     )
     conn.commit()
     conn.close()
@@ -169,11 +236,12 @@ def update_menu(user_id: int, menu: str) -> None:
 
 def simpan_riwayat(user_id: int, keluhan: str, menu: str, jawaban_ai: str) -> None:
     """Menyimpan riwayat konsultasi ke database."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = dapatkan_koneksi()
     cursor = conn.cursor()
+    p = dapatkan_placeholder()
     waktu = datetime.now().strftime("%Y-%m-%d %H:%M")
     cursor.execute(
-        "INSERT INTO riwayat (user_id, keluhan, menu, jawaban_ai, waktu) VALUES (?, ?, ?, ?, ?)",
+        f"INSERT INTO riwayat (user_id, keluhan, menu, jawaban_ai, waktu) VALUES ({p}, {p}, {p}, {p}, {p})",
         (user_id, keluhan, menu, jawaban_ai, waktu),
     )
     conn.commit()
@@ -182,10 +250,11 @@ def simpan_riwayat(user_id: int, keluhan: str, menu: str, jawaban_ai: str) -> No
 
 def ambil_riwayat(user_id: int, limit: int = 10) -> list:
     """Mengambil riwayat konsultasi terakhir pengguna."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = dapatkan_koneksi()
     cursor = conn.cursor()
+    p = dapatkan_placeholder()
     cursor.execute(
-        "SELECT keluhan, menu, waktu FROM riwayat WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+        f"SELECT keluhan, menu, waktu FROM riwayat WHERE user_id = {p} ORDER BY id DESC LIMIT {p}",
         (user_id, limit),
     )
     rows = cursor.fetchall()
@@ -195,9 +264,10 @@ def ambil_riwayat(user_id: int, limit: int = 10) -> list:
 
 def hitung_total_konsultasi(user_id: int) -> int:
     """Menghitung total konsultasi pengguna."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = dapatkan_koneksi()
     cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM riwayat WHERE user_id = ?", (user_id,))
+    p = dapatkan_placeholder()
+    cursor.execute(f"SELECT COUNT(*) FROM riwayat WHERE user_id = {p}", (user_id,))
     total = cursor.fetchone()[0]
     conn.close()
     return total
@@ -205,11 +275,12 @@ def hitung_total_konsultasi(user_id: int) -> int:
 
 def reset_user_data(user_id: int) -> None:
     """Menghapus semua data pengguna dari database."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = dapatkan_koneksi()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM riwayat WHERE user_id = ?", (user_id,))
+    p = dapatkan_placeholder()
+    cursor.execute(f"DELETE FROM riwayat WHERE user_id = {p}", (user_id,))
     cursor.execute(
-        "UPDATE users SET alergi = 'Tidak ada', menu = '', reminder = 0 WHERE user_id = ?",
+        f"UPDATE users SET alergi = 'Tidak ada', menu = '', reminder = 0 WHERE user_id = {p}",
         (user_id,),
     )
     conn.commit()
@@ -231,7 +302,6 @@ def bersihkan_alergi(teks: str) -> str:
 # ──────────────────────────────────────────────
 def ekstrak_nama_menu(respons: str) -> str:
     """Mengambil nama menu secara cerdas dari respons Gemini."""
-    # Cari pola "Menu: Nama Menu" atau "* Menu: Nama Menu"
     match = re.search(r"(?:Menu|Rekomendasi Menu)\s*:\s*([^\n]+)", respons, re.IGNORECASE)
     if match:
         return match.group(1).replace("*", "").strip()
@@ -242,6 +312,18 @@ def ekstrak_nama_menu(respons: str) -> str:
             return line.replace("*", "").strip()
             
     return "Menu Sehat & Nutrisi Lokal"
+
+
+# ──────────────────────────────────────────────
+# Menu Keyboard Utama (Bawah Layar / Reply Keyboard)
+# ──────────────────────────────────────────────
+def dapatkan_keyboard_utama() -> ReplyKeyboardMarkup:
+    """Membuat keyboard menu utama di bagian bawah chat."""
+    keyboard = [
+        [KeyboardButton("🥗 Kelola Alergi"), KeyboardButton("👤 Profil Saya")],
+        [KeyboardButton("📋 Riwayat Menu"), KeyboardButton("📖 Bantuan & Tips")],
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, placeholder_keyboard="Pilih menu atau ketik keluhan...")
 
 
 # ──────────────────────────────────────────────
@@ -265,32 +347,23 @@ def bangun_system_instruction(alergi: str) -> str:
     if alergi.lower() != "tidak ada":
         daftar_alergi = [a.strip() for a in alergi.split(",")]
         instruksi += (
-            "- DILARANG KERAS merekomendasikan menu yang mengandung bahan-bahan berikut "
-            "beserta SELURUH TURUNAN dan OLAHAN-nya:\n"
+            "- DILARANG KERAS merekomendasikan menu yang mengandung bahan-bahan tersebut beserta seluruh turunannya.\n"
         )
-        for item in daftar_alergi:
-            instruksi += f"  * {item} (termasuk semua produk olahan yang mengandung {item})\n"
-        instruksi += (
-            "- Jika tidak ada menu yang aman dari alergi, jelaskan dengan sopan dan "
-            "sarankan pengguna untuk berkonsultasi ke dokter.\n"
-        )
-    else:
-        instruksi += "- Pengguna tidak memiliki alergi. Tidak ada batasan bahan.\n"
 
     instruksi += (
-        "\n### 3. FORMAT JAWABAN (WAJIB DIIKUTI PERSIS)\n"
-        "Jawab HANYA dalam format berikut, tanpa tambahan teks lain di luar format ini:\n\n"
-        "🍽️ *REKOMENDASI MENU SEHAT*\n\n"
+        "\n### 3. FORMAT RESPON (LENGKAP & DETAIL)\n"
+        "Jawab dengan struktur rapi berikut:\n\n"
+        "🩺 *ANALISIS MEDIS & KELUHAN*\n"
+        "[Berikan penjelasan medis singkat mengenai keluhan mereka (misal: kenapa susah tidur, bagaimana cara menambah berat badan di umur mereka, dll). Berikan saran medis yang jelas dan solutif!]\n\n"
+        "🍽️ *REKOMENDASI MENU SEHAT*\n"
         "Menu: [Nama Masakan Indonesia yang Spesifik]\n"
-        "Bahan: [Sebutkan semua bahan utama, pisahkan dengan koma]\n"
-        "Alasan Medis: [Jelaskan singkat kenapa menu ini cocok untuk keluhan pengguna, "
-        "sebutkan kandungan gizi yang relevan]\n"
-        "Estimasi Harga: [Perkiraan total harga bahan dalam Rupiah, misal: Rp 10.000 - Rp 15.000]\n\n"
-        "💡 *Tips Tambahan:* [Satu kalimat tips kesehatan singkat yang relevan]\n\n"
-        "### 4. GAYA BAHASA\n"
-        "- Gunakan bahasa Indonesia yang ramah, hangat, dan mudah dipahami.\n"
-        "- Jangan gunakan istilah medis yang terlalu teknis.\n"
-        "- Berikan semangat dan motivasi kepada pengguna.\n"
+        "Bahan: [Bahan-bahan utama yang murah dan lokal]\n"
+        "Alasan Medis Menu: [Kandungan gizi menu ini dan hubungannya dengan penyembuhan keluhan]\n"
+        "Estimasi Harga: [Kisaran harga bahan dalam Rupiah, misal: Rp 10.000 - Rp 15.000]\n\n"
+        "💡 *TIPS KESEHATAN TAMBAHAN*\n"
+        "- [Tips gaya hidup, pola tidur, atau porsi makan untuk keluhan tersebut]\n"
+        "- [Tips tambahan lainnya]\n\n"
+        "Gunakan bahasa Indonesia yang sangat ramah, hangat, empati, dan menyemangati!"
     )
 
     return instruksi
@@ -589,7 +662,7 @@ async def proses_konsultasi(
     user,
     keluhan: str,
 ) -> None:
-    """Mengirim keluhan ke Gemini AI dengan menyertakan memori chat terakhir dari SQLite."""
+    """Mengirim keluhan ke Gemini AI dengan menyertakan memori chat terakhir dari SQLite/PostgreSQL."""
     user_data = get_or_create_user(user.id, user.first_name)
 
     pesan_tunggu = await update.message.reply_text(
@@ -607,12 +680,10 @@ async def proses_konsultasi(
         
         if riwayat_terakhir:
             konteks_percakapan = "Berikut adalah riwayat konsultasi terakhir dari pengguna ini untuk menjaga kesinambungan percakapan:\n"
-            # Urutkan dari yang terlama ke terbaru (riwayat diambil DESC, jadi kita balik)
             for r_keluhan, r_menu, r_waktu in reversed(riwayat_terakhir):
                 konteks_percakapan += f"- Waktu: {r_waktu} | Keluhan: '{r_keluhan}' | Menu Direkomendasikan: '{r_menu}'\n"
             konteks_percakapan += "\nGunakan informasi di atas untuk melanjutkan konsultasi jika keluhan baru ini berhubungan dengan keluhan sebelumnya. Jangan rekomendasikan menu yang sama persis jika keluhannya mirip, berikan variasi menu baru!\n\n"
 
-        # Gabungkan konteks riwayat dengan keluhan saat ini
         prompt_final = f"{konteks_percakapan}Keluhan kesehatan baru saya saat ini: {keluhan}"
 
         response = gemini_client.models.generate_content(
@@ -620,7 +691,7 @@ async def proses_konsultasi(
             contents=prompt_final,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
-                temperature=0.2, # Sedikit dinaikkan agar variatif tapi tetap patuh
+                temperature=0.2,
                 max_output_tokens=1024,
             ),
         )
